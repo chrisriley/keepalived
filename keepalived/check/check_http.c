@@ -328,8 +328,6 @@ int
 timeout_epilog(thread_t * thread, char *debug_msg)
 {
 	checker_t *checker = THREAD_ARG(thread);
-	http_checker_t *http_get_check = CHECKER_ARG(checker);
-	http_t *http = HTTP_ARG(http_get_check);
 
 	/* check if server is currently alive */
 	if (svr_checker_up(checker->id, checker->rs)) {
@@ -755,7 +753,7 @@ http_connect_thread(thread_t * thread)
 		return epilog(thread, 1, 1, 0) + 1;
 
 	/* Create the socket */
-	if ((fd = socket(co->dst.ss_family, SOCK_STREAM, IPPROTO_TCP)) == -1) {
+	if ((fd = socket(co->dst.ss_family, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP)) == -1) {
 		log_message(LOG_INFO, "WEB connection fail to create socket. Rescheduling.");
 		thread_add_timer(thread->master, http_connect_thread, checker,
 				checker->vs->delay_loop);

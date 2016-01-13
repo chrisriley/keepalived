@@ -20,6 +20,7 @@
  * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
  */
 
+#include "global_data.h"
 #include "vrrp_data.h"
 #include "vrrp_index.h"
 #include "vrrp_sync.h"
@@ -150,20 +151,13 @@ static void
 free_sock(void *sock_data)
 {
 	sock_t *sock = sock_data;
-	interface_t *ifp;
 
 	/* First of all cancel pending thread */
 	thread_cancel(sock->thread);
 
 	/* Close related socket */
-	if (sock->fd_in > 0) {
-		ifp = if_get_by_ifindex(sock->ifindex);
-		if (sock->unicast) {
-			close(sock->fd_in);
-		} else {
-			if_leave_vrrp_group(sock->family, sock->fd_in, ifp);
-		}
-	}
+	if (sock->fd_in > 0)
+		close(sock->fd_in);
 	if (sock->fd_out > 0)
 		close(sock->fd_out);
 	FREE(sock_data);
@@ -243,14 +237,14 @@ dump_vrrp(void *data)
 		log_message(LOG_INFO, "   Want State = BACKUP");
 	else
 		log_message(LOG_INFO, "   Want State = MASTER");
-	log_message(LOG_INFO, "   Runing on device = %s", IF_NAME(vrrp->ifp));
+	log_message(LOG_INFO, "   Running on device = %s", IF_NAME(vrrp->ifp));
 	if (vrrp->dont_track_primary)
 		log_message(LOG_INFO, "   VRRP interface tracking disabled");
 	if (vrrp->saddr.ss_family)
 		log_message(LOG_INFO, "   Using src_ip = %s"
 				    , inet_sockaddrtos(&vrrp->saddr));
 	if (vrrp->lvs_syncd_if)
-		log_message(LOG_INFO, "   Runing LVS sync daemon on interface = %s",
+		log_message(LOG_INFO, "   Running LVS sync daemon on interface = %s",
 		       vrrp->lvs_syncd_if);
 	if (vrrp->garp_delay)
 		log_message(LOG_INFO, "   Gratuitous ARP delay = %d",
@@ -326,9 +320,10 @@ dump_vrrp(void *data)
 	if (vrrp->smtp_alert)
 		log_message(LOG_INFO, "   Using smtp notification");
 	if (__test_bit(VRRP_VMAC_BIT, &vrrp->vmac_flags))
-		log_message(LOG_INFO, "   Using VRRP VMAC (flags:%s|%s)"
+		log_message(LOG_INFO, "   Using VRRP VMAC (flags:%s|%s), vmac ifindex %d"
 				    , (__test_bit(VRRP_VMAC_UP_BIT, &vrrp->vmac_flags)) ? "UP" : "DOWN"
-				    , (__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags)) ? "xmit_base" : "xmit");
+				    , (__test_bit(VRRP_VMAC_XMITBASE_BIT, &vrrp->vmac_flags)) ? "xmit_base" : "xmit"
+				    , vrrp->ifp->base_ifindex);
 }
 
 void
@@ -365,7 +360,7 @@ alloc_vrrp(char *iname)
 	new->family = AF_INET;
 	new->wantstate = VRRP_STATE_BACK;
 	new->init_state = VRRP_STATE_BACK;
-	new->version = VRRP_VERSION_2;
+	new->version = global_data->vrrp_version;
 	new->master_priority = 0;
 	new->last_transition = timer_now();
 	new->adver_int = TIMER_HZ;
@@ -373,8 +368,9 @@ alloc_vrrp(char *iname)
 	new->stats = alloc_vrrp_stats();
 	memcpy(new->iname, iname, size);
 	new->quick_sync = 0;
-	new->garp_rep = VRRP_GARP_REP;
-	new->garp_refresh_rep = VRRP_GARP_REFRESH_REP;
+	new->garp_rep = global_data->vrrp_garp_rep;
+	new->garp_refresh_rep = global_data->vrrp_garp_refresh_rep;
+	new->garp_delay = global_data->vrrp_garp_delay;
 
 	list_add(vrrp_data->vrrp, new);
 }

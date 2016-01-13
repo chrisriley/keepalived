@@ -56,8 +56,10 @@ extern char *vrrp_pidfile;
 static void
 stop_vrrp(void)
 {
-	if (!__test_bit(DONT_RELEASE_VRRP_BIT, &debug))
-		shutdown_vrrp_instances();
+	/* Ensure any interfaces are in backup mode,
+	 * sending a priority 0 vrrp message
+	 */
+	restore_vrrp_interfaces();
 
 	/* Clear static entries */
 	netlink_rtlist(vrrp_data->static_routes, IPROUTE_DEL);
@@ -82,6 +84,16 @@ stop_vrrp(void)
 	/* Clean data */
 	free_global_data(global_data);
 	vrrp_dispatcher_release(vrrp_data);
+
+	/* This is not nice, but it significantly increases the chances
+	 * of an IGMP leave group being sent for some reason.
+	 * Since we are about to exit, it doesn't affect anything else
+	 * running. */
+	sleep ( 1 );
+
+	if (!__test_bit(DONT_RELEASE_VRRP_BIT, &debug))
+		shutdown_vrrp_instances();
+
 	free_vrrp_data(vrrp_data);
 	free_vrrp_buffer();
 	free_interface_queue();
@@ -231,8 +243,7 @@ reload_vrrp_thread(thread_t * thread)
 	SET_RELOAD;
 
 	/* Signal handling */
-	signal_reset();
-	signal_handler_destroy();
+	signal_handler_reset();
 
 	/* Destroy master thread */
 	vrrp_dispatcher_release(vrrp_data);
@@ -337,6 +348,8 @@ start_vrrp_child(void)
 		return 0;
 	}
 
+	signal_handler_destroy();
+
 	/* Opening local VRRP syslog channel */
 	openlog(PROG_VRRP, LOG_PID | ((__test_bit(LOG_CONSOLE_BIT, &debug)) ? LOG_CONS : 0)
 			 , (log_facility==LOG_DAEMON) ? LOG_LOCAL1 : log_facility);
@@ -349,7 +362,6 @@ start_vrrp_child(void)
 	}
 
 	/* Create the new master thread */
-	signal_handler_destroy();
 	thread_destroy_master(master);
 	master = thread_make_master();
 

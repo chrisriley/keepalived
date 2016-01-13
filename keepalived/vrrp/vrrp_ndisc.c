@@ -148,6 +148,7 @@ ndisc_send_unsolicited_na(ip_address_t *ipaddress)
 
 	/* ICMPv6 Header */
 	icmp6h->icmp6_type = NDISC_NEIGHBOUR_ADVERTISEMENT;
+	icmp6h->icmp6_router = 1;
 
 	/* Override flag is set to indicate that the advertisement
 	 * should override an existing cache entry and update the
@@ -187,7 +188,7 @@ ndisc_init(void)
 				       sizeof(struct ndhdr) + sizeof(struct nd_opt_hdr) + ETH_ALEN);
 
 	/* Create the socket descriptor */
-	ndisc_fd = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_IPV6));
+	ndisc_fd = socket(PF_PACKET, SOCK_RAW | SOCK_CLOEXEC, htons(ETH_P_IPV6));
 }
 
 void

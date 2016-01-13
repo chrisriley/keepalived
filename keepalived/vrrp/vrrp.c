@@ -272,7 +272,9 @@ vrrp_in_chk_vips(vrrp_t * vrrp, ip_address_t *ipaddress, unsigned char *buffer)
 
 /*
  * VRRP incoming packet check.
- * return 0 if the pkt is valid, != 0 otherwise.
+ * return VRRP_PACKET_OK if the pkt is valid, or
+ * 	  VRRP_PACKET_KO if packet invalid or
+ * 	  VRRP_PACKET_DROP if packet not relevant to us
  */
 static int
 vrrp_in_chk(vrrp_t * vrrp, char *buffer)
@@ -321,7 +323,7 @@ vrrp_in_chk(vrrp_t * vrrp, char *buffer)
 		 */
 		if ((ntohs(ip->tot_len) - ihl) <= sizeof(vrrphdr_t)) {
 			log_message(LOG_INFO,
-			       "ip payload too short. %d and expect at least %lu",
+			       "ip payload too short. %d and expect at least %zu",
 			       ntohs(ip->tot_len) - ihl, sizeof(vrrphdr_t));
 			++vrrp->stats->packet_len_err;
 			return VRRP_PACKET_KO;
@@ -948,7 +950,7 @@ vrrp_send_adv(vrrp_t * vrrp, int prio)
 	}
 
 	++vrrp->stats->advert_sent;
-	/* send it */
+	/* sent it */
 	return 0;
 }
 
@@ -984,11 +986,11 @@ vrrp_send_update(vrrp_t * vrrp, ip_address_t * ipaddress, int idx)
 
 	if (!IP_IS6(ipaddress)) {
 		msg = "gratuitous ARPs";
-		inet_ntop(AF_INET, &ipaddress->u.sin.sin_addr, addr_str, 41);
+		inet_ntop(AF_INET, &ipaddress->u.sin.sin_addr, addr_str, sizeof(addr_str));
 		send_gratuitous_arp(ipaddress);
 	} else {
 		msg = "Unsolicited Neighbour Adverts";
-		inet_ntop(AF_INET6, &ipaddress->u.sin6_addr, addr_str, 41);
+		inet_ntop(AF_INET6, &ipaddress->u.sin6_addr, addr_str, sizeof(addr_str));
 		ndisc_send_unsolicited_na(ipaddress);
 	}
 
@@ -1111,10 +1113,10 @@ vrrp_restore_interface(vrrp_t * vrrp, int advF)
 {
         /* if we stop vrrp, warn the other routers to speed up the recovery */
 	if (advF) {
-	        syslog(LOG_INFO, "VRRP_Instance(%s) sending 0 priority",
-		       vrrp->iname);
 		vrrp_send_adv(vrrp, VRRP_PRIO_STOP);
 		++vrrp->stats->pri_zero_sent;
+	        syslog(LOG_INFO, "VRRP_Instance(%s) sent 0 priority",
+		       vrrp->iname);
 	}
 
 	/* remove virtual routes */
@@ -1308,8 +1310,8 @@ vrrp_saddr_cmp(struct sockaddr_storage *addr, vrrp_t *vrrp)
 int
 vrrp_state_master_rx(vrrp_t * vrrp, char *buf, int buflen)
 {
-	vrrphdr_t *hd = NULL;
-	int ret = 0, proto = 0;
+	vrrphdr_t *hd;
+	int ret, proto = 0;
 	ipsec_ah_t *ah;
 
 	/* return on link failure */
@@ -1433,11 +1435,17 @@ open_vrrp_send_socket(sa_family_t family, int proto, int idx, int unicast)
 	interface_t *ifp;
 	int fd = -1;
 
+	if (family != AF_INET && family != AF_INET6) {
+		log_message(LOG_INFO, "cant open raw socket. unknown family=%d"
+				    , family);
+		return -1;
+	}
+
 	/* Retreive interface_t */
 	ifp = if_get_by_ifindex(idx);
 
 	/* Create and init socket descriptor */
-	fd = socket(family, SOCK_RAW, proto);
+	fd = socket(family, SOCK_RAW | SOCK_CLOEXEC, proto);
 	if (fd < 0) {
 		log_message(LOG_INFO, "cant open raw socket. errno=%d", errno);
 		return -1;
@@ -1445,30 +1453,25 @@ open_vrrp_send_socket(sa_family_t family, int proto, int idx, int unicast)
 
 	if (family == AF_INET) {
 		/* Set v4 related */
+		if_setsockopt_mcast_all(family, &fd);
 		if_setsockopt_hdrincl(&fd);
-		if_setsockopt_bindtodevice(&fd, ifp);
-		if (!unicast)
-			if_setsockopt_mcast_loop(family, &fd);
-		if_setsockopt_priority(&fd);
-		if (fd < 0)
-			return -1;
+		if (unicast)
+			if_setsockopt_bindtodevice(&fd, ifp);
 	} else if (family == AF_INET6) {
 		/* Set v6 related */
 		if_setsockopt_ipv6_checksum(&fd);
-		if (!unicast) {
+		if (!unicast)
 			if_setsockopt_mcast_hops(family, &fd);
-			if_setsockopt_mcast_if(family, &fd, ifp);
-			if_setsockopt_mcast_loop(family, &fd);
-		}
-		if_setsockopt_priority(&fd);
-		if (fd < 0)
-			return -1;
-	} else {
-		log_message(LOG_INFO, "cant open raw socket. unknow family=%d"
-				    , family);
-		close(fd);
-		return -1;
 	}
+
+	if (!unicast) {
+		if_setsockopt_mcast_if(family, &fd, ifp);
+		if_setsockopt_mcast_loop(family, &fd);
+	}
+
+	if_setsockopt_priority(&fd);
+	if (fd < 0)
+		return -1;
 
 	return fd;
 }
@@ -1485,24 +1488,29 @@ open_vrrp_socket(sa_family_t family, int proto, int idx,
 	ifp = if_get_by_ifindex(idx);
 
 	/* open the socket */
-	fd = socket(family, SOCK_RAW, proto);
+	fd = socket(family, SOCK_RAW | SOCK_CLOEXEC, proto);
 	if (fd < 0) {
 		int err = errno;
 		log_message(LOG_INFO, "cant open raw socket. errno=%d", err);
 		return -1;
 	}
 
+	/* Ensure no unwanted multicast packets are queued to this interface */
+	if (family == AF_INET)
+		if_setsockopt_mcast_all(family, &fd);
+
 	/* Join the VRRP MCAST group */
 	if (!unicast) {
 		if_join_vrrp_group(family, &fd, ifp, proto);
 	}
+	else if (family == AF_INET) {
+		/* Bind inbound stream */
+		if_setsockopt_bindtodevice(&fd, ifp);
+	}
 	if (fd < 0)
 		return -1;
 
-	if (family == AF_INET) {
-		/* Bind inbound stream */
-		if_setsockopt_bindtodevice(&fd, ifp);
-	} else if (family == AF_INET6) {
+	if (family == AF_INET6) {
 		/* Let kernel calculate checksum. */
 		if_setsockopt_ipv6_checksum(&fd);
 	}
@@ -1513,11 +1521,10 @@ open_vrrp_socket(sa_family_t family, int proto, int idx,
 void
 close_vrrp_socket(vrrp_t * vrrp)
 {
-	if (LIST_ISEMPTY(vrrp->unicast_peer)) {
+	if (LIST_ISEMPTY(vrrp->unicast_peer))
 		if_leave_vrrp_group(vrrp->family, vrrp->fd_in, vrrp->ifp);
-	} else {
-		close(vrrp->fd_in);
-	}
+
+	close(vrrp->fd_in);
 	close(vrrp->fd_out);
 }
 
@@ -1548,6 +1555,25 @@ new_vrrp_socket(vrrp_t * vrrp)
 	return vrrp->fd_in;
 }
 
+/* handle terminate state phase 1 */
+void
+restore_vrrp_interfaces(void)
+{
+	list l = vrrp_data->vrrp;
+	element e;
+	vrrp_t *vrrp;
+
+	/* Ensure any interfaces are in backup mode,
+	 * sending a priority 0 vrrp message
+	 */
+	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
+		vrrp = ELEMENT_DATA(e);
+		/* Remove VIPs/VROUTEs/VRULEs */
+		if (vrrp->state == VRRP_STATE_MAST)
+			vrrp_restore_interface(vrrp, 1);
+	}
+}
+
 /* handle terminate state */
 void
 shutdown_vrrp_instances(void)
@@ -1558,10 +1584,6 @@ shutdown_vrrp_instances(void)
 
 	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
 		vrrp = ELEMENT_DATA(e);
-
-		/* Remove VIPs/VROUTEs/VRULEs */
-		if (vrrp->state == VRRP_STATE_MAST)
-			vrrp_restore_interface(vrrp, 1);
 
 		/* Remove VMAC */
 		if (__test_bit(VRRP_VMAC_BIT, &vrrp->vmac_flags))
